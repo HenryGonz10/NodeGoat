@@ -160,49 +160,39 @@ jobs:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           mkdir -p reports/dependency-check
-          SUPPRESSION_ARGS=()
+          chmod -R a+rwX reports
+
+          # Always use NVD datafeed mirror to avoid empty-API-key fatal errors.
+          # If NVD_API_KEY exists, also pass it for API-assisted updates.
+          EXTRA=()
+          {
+            echo "mode=nvd-datafeed-mirror"
+            echo "nvd_api_key=$([ -n \"$NVD_API_KEY\" ] && echo present || echo absent)"
+            echo "what=NVD API update fails with empty/missing API key"
+            echo "why=Dependency-Check NVD client requires a non-empty key for API mode"
+            echo "solution=Optional secret NVD_API_KEY; default fallback is --nvdDatafeed mirror"
+          } > reports/dependency-check/sca-runtime-notes.txt
+
+          EXTRA+=(--nvdDatafeed "https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz")
+          if [ -n "${NVD_API_KEY}" ]; then
+            EXTRA+=(--nvdApiKey "${NVD_API_KEY}")
+          fi
           if [ -f dependency-check-suppressions.xml ]; then
             echo "Using suppression file dependency-check-suppressions.xml"
-            SUPPRESSION_ARGS+=(--suppression /src/dependency-check-suppressions.xml)
+            EXTRA+=(--suppression /src/dependency-check-suppressions.xml)
           else
             echo "No suppression file present (expected for initial vulnerable run)"
           fi
 
-          # Modern Dependency-Check NVD API rejects an empty/missing API key (fatal update error).
-          # Technically correct options:
-          #   1) secrets.NVD_API_KEY  -> NVD REST API
-          #   2) no key               -> official NVD JSON 2.0 datafeed / project mirror
-          NVD_ARGS=()
-          if [ -n "${NVD_API_KEY}" ]; then
-            echo "NVD API key detected; using authenticated NVD API access"
-            NVD_ARGS+=(--nvdApiKey "${NVD_API_KEY}")
-            {
-              echo "mode=nvd-api"
-              echo "nvd_api_key=present"
-              echo "note=NVD REST API + Node/RetireJS analyzers"
-            } > reports/dependency-check/sca-runtime-notes.txt
-          else
-            echo "WARNING: secrets.NVD_API_KEY not set."
-            echo "Observed local failure without key: Invalid API Key / Error updating the NVD Data."
-            echo "Fallback: --nvdDatafeed using Dependency-Check NVD JSON cache mirror (no API key)."
-            echo "Preferred long-term fix: set repo secret NVD_API_KEY from https://nvd.nist.gov/developers/request-an-api-key"
-            NVD_ARGS+=(--nvdDatafeed "https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz")
-            {
-              echo "mode=nvd-datafeed-mirror"
-              echo "nvd_api_key=absent"
-              echo "what=NVD API update fails with empty/missing API key"
-              echo "why=Dependency-Check NVD client requires a non-empty key for API mode"
-              echo "solution=Set GitHub Actions secret NVD_API_KEY"
-              echo "fallback=--nvdDatafeed mirror so SCA still runs and --failOnCVSS 7 remains enforceable"
-            } > reports/dependency-check/sca-runtime-notes.txt
-          fi
-
           set +e
-          docker run --rm \
+          # Run as root inside the container so reports can be written back to the workspace.
+          # Scan package manifests (same approach validated locally).
+          docker run --rm --user 0:0 \
             -v "$PWD":/src \
             -v dependency-check-data:/usr/share/dependency-check/data \
             owasp/dependency-check:latest \
-            --scan /src \
+            --scan /src/package.json \
+            --scan /src/package-lock.json \
             --project "OWASP NodeGoat" \
             --format HTML \
             --format JSON \
@@ -210,17 +200,15 @@ jobs:
             --failOnCVSS 7 \
             --enableExperimental \
             --nodeAuditSkipDevDependencies \
-            --exclude "/src/.git/**" \
-            --exclude "/src/test/**" \
-            --exclude "/src/artifacts/**" \
-            --exclude "/src/evidencias/**" \
-            --exclude "/src/reports/**" \
-            "${NVD_ARGS[@]}" \
-            "${SUPPRESSION_ARGS[@]}"
-          code=$?
+            "${EXTRA[@]}" \
+            2>&1 | tee reports/dependency-check/console.log
+          code=${PIPESTATUS[0]}
           echo "$code" > reports/dependency-check/exit-code.txt
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           echo "Dependency-Check exit code: $code"
+          echo "Files produced:"
+          ls -la reports/dependency-check || true
+          chmod -R a+rwX reports/dependency-check || true
 
       - name: Evaluate SCA gate status from report
         if: always()
