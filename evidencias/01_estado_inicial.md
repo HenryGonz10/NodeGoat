@@ -63,4 +63,4 @@ Además, el inventario de dependencias antiguas de NodeGoat aporta hallazgos SCA
 ## Ejecución en GitHub Actions
 Registrar aquí la URL del run FAILED tras publicar el Commit 1 en el fork:
 
-- URL FAILED: ____________________________________
+- URL FAILED: https://github.com/HenryGonz10/NodeGoat/actions/runs/44002039208

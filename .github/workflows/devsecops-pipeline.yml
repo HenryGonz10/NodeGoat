@@ -2,9 +2,9 @@ name: DevSecOps Pipeline - SAST SCA SBOM Quality Gate
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, devsecops-pipeline, evidence-failed]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, devsecops-pipeline, evidence-failed]
   workflow_dispatch:
 
 permissions:
