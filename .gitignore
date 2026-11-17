@@ -35,3 +35,8 @@ reports/
 sbom.cyclonedx.json
 audit-temp.json
 *.cdx.json
+
+qg-job.html
+qg-logs.txt
+reports/
+
