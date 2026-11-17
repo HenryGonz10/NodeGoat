@@ -121,12 +121,13 @@ MongoClient.connect(db, (err, db) => {
     app.use(express.static(`${__dirname}/app/assets`));
 
 
-    // Initializing marked library
-    // Fix for A9 - Insecure Dependencies
+    // Initializing marked library (remediated: marked upgraded from 0.3.5 -> 4.x)
+    // Keep a callable helper for Swig templates: {{ marked(doc.memo) }}
     marked.setOptions({
-        sanitize: true
+        gfm: true,
+        breaks: false
     });
-    app.locals.marked = marked;
+    app.locals.marked = (text) => marked.parse(String(text == null ? "" : text));
 
     // Application routes
     routes(app, db);
