@@ -344,6 +344,15 @@ jobs:
             --output evidencias/quality-gate-resumen.md
           code=$?
           echo "gate_exit=$code" >> "$GITHUB_OUTPUT"
+          if [ -f evidencias/quality-gate-resumen.md ]; then
+            cat evidencias/quality-gate-resumen.md
+            {
+              echo "## Quality Gate"
+              echo '```'
+              cat evidencias/quality-gate-resumen.md
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ $code -eq 0 ]; then
             echo "QUALITY GATE: PASSED"
           else

