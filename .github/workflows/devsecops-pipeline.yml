@@ -303,7 +303,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: semgrep-results
-          path: reports
+          path: .
 
       - name: Download Dependency-Check artifacts
         continue-on-error: true
@@ -328,19 +328,30 @@ jobs:
         id: gate
         run: |
           mkdir -p evidencias reports
+          echo "Workspace layout (debug):"
+          find reports sbom-artifacts -type f 2>/dev/null | sort || true
+          ls -la reports || true
+          ls -la reports/dependency-check || true
+
+          # Locate Semgrep JSON (artifact may unpack at repo root or under reports/)
+          SEMGREP_JSON="reports/semgrep-results.json"
+          if [ ! -f "$SEMGREP_JSON" ]; then
+            SEMGREP_JSON=$(find . -name 'semgrep-results.json' 2>/dev/null | head -n 1 || true)
+          fi
+
           # Locate dependency-check JSON
           DC_JSON="reports/dependency-check/dependency-check-report.json"
           if [ ! -f "$DC_JSON" ]; then
-            candidate=$(find reports/dependency-check -name '*.json' ! -name 'exit-code.txt' 2>/dev/null | head -n 1 || true)
-            if [ -n "$candidate" ]; then
-              DC_JSON="$candidate"
-            fi
+            DC_JSON=$(find reports/dependency-check -name '*.json' ! -name 'exit-code.txt' 2>/dev/null | head -n 1 || true)
           fi
+
+          echo "Using Semgrep report: ${SEMGREP_JSON:-MISSING}"
+          echo "Using Dependency-Check report: ${DC_JSON:-MISSING}"
 
           set +e
           python scripts/quality_gate.py \
-            --semgrep reports/semgrep-results.json \
-            --dependency-check "$DC_JSON" \
+            --semgrep "${SEMGREP_JSON:-reports/semgrep-results.json}" \
+            --dependency-check "${DC_JSON:-reports/dependency-check/dependency-check-report.json}" \
             --threshold 7.0 \
             --output evidencias/quality-gate-resumen.md
           code=$?
