@@ -317,47 +317,69 @@ jobs:
         run: |
           mkdir -p evidencias reports
           echo "Workspace layout (debug):"
-          find reports sbom-artifacts -type f 2>/dev/null | sort || true
-          ls -la reports || true
-          ls -la reports/dependency-check || true
+          find . -name 'sast-status.txt' -o -name 'sca-status.txt' -o -name 'semgrep-results.json' -o -name 'dependency-check-report.json' 2>/dev/null | sort || true
 
-          # Locate Semgrep JSON (artifact may unpack at repo root or under reports/)
-          SEMGREP_JSON="reports/semgrep-results.json"
-          if [ ! -f "$SEMGREP_JSON" ]; then
-            SEMGREP_JSON=$(find . -name 'semgrep-results.json' 2>/dev/null | head -n 1 || true)
+          SAST_STATUS=$(find . -name 'sast-status.txt' 2>/dev/null | head -n 1 || true)
+          SCA_STATUS=$(find . -name 'sca-status.txt' 2>/dev/null | head -n 1 || true)
+          SEMGREP_JSON=$(find . -name 'semgrep-results.json' 2>/dev/null | head -n 1 || true)
+          DC_JSON=$(find . -name 'dependency-check-report.json' 2>/dev/null | head -n 1 || true)
+
+          echo "sast-status file: ${SAST_STATUS:-MISSING}"
+          echo "sca-status file: ${SCA_STATUS:-MISSING}"
+          echo "semgrep json: ${SEMGREP_JSON:-MISSING}"
+          echo "dependency-check json: ${DC_JSON:-MISSING}"
+
+          # Prefer status files produced by analysis jobs (same policy, reliable paths).
+          sast="FAIL"
+          sca="FAIL"
+          if [ -n "$SAST_STATUS" ] && [ -f "$SAST_STATUS" ]; then
+            sast=$(tr -d '[:space:]' < "$SAST_STATUS" | tr '[:lower:]' '[:upper:]')
+          fi
+          if [ -n "$SCA_STATUS" ] && [ -f "$SCA_STATUS" ]; then
+            sca=$(tr -d '[:space:]' < "$SCA_STATUS" | tr '[:lower:]' '[:upper:]')
           fi
 
-          # Locate dependency-check JSON
-          DC_JSON="reports/dependency-check/dependency-check-report.json"
-          if [ ! -f "$DC_JSON" ]; then
-            DC_JSON=$(find reports/dependency-check -name '*.json' ! -name 'exit-code.txt' 2>/dev/null | head -n 1 || true)
-          fi
-
-          echo "Using Semgrep report: ${SEMGREP_JSON:-MISSING}"
-          echo "Using Dependency-Check report: ${DC_JSON:-MISSING}"
-
-          set +e
-          python scripts/quality_gate.py \
-            --semgrep "${SEMGREP_JSON:-reports/semgrep-results.json}" \
-            --dependency-check "${DC_JSON:-reports/dependency-check/dependency-check-report.json}" \
-            --threshold 7.0 \
-            --output evidencias/quality-gate-resumen.md
-          code=$?
-          echo "gate_exit=$code" >> "$GITHUB_OUTPUT"
-          if [ -f evidencias/quality-gate-resumen.md ]; then
-            cat evidencias/quality-gate-resumen.md
-            {
-              echo "## Quality Gate"
-              echo '```'
-              cat evidencias/quality-gate-resumen.md
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ $code -eq 0 ]; then
-            echo "QUALITY GATE: PASSED"
+          # Also run Python evaluator when JSON reports are available (extra detail for artifact).
+          if [ -n "$SEMGREP_JSON" ] && [ -n "$DC_JSON" ]; then
+            python scripts/quality_gate.py \
+              --semgrep "$SEMGREP_JSON" \
+              --dependency-check "$DC_JSON" \
+              --threshold 7.0 \
+              --output evidencias/quality-gate-resumen.md || true
           else
-            echo "QUALITY GATE: FAILED"
+            {
+              echo "===================================================="
+              echo "QUALITY GATE detail reports partially missing"
+              echo "===================================================="
+              echo "SAST status file: $sast"
+              echo "SCA status file: $sca"
+            } > evidencias/quality-gate-resumen.md
           fi
+
+          if [ "$sast" = "PASS" ] && [ "$sca" = "PASS" ]; then
+            overall="PASSED"
+            code=0
+          else
+            overall="FAILED"
+            code=1
+          fi
+
+          {
+            echo ""
+            echo "Status-file decision:"
+            echo "  SAST=$sast"
+            echo "  SCA=$sca"
+            echo "QUALITY GATE: $overall"
+          } | tee -a evidencias/quality-gate-resumen.md
+
+          {
+            echo "## Quality Gate"
+            echo '```'
+            cat evidencias/quality-gate-resumen.md
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "QUALITY GATE: $overall"
           exit $code
 
       - name: Upload Quality Gate summary
