@@ -1,0 +1,361 @@
+name: DevSecOps Pipeline - SAST SCA SBOM Quality Gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sast-semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Semgrep
+        run: pip install --upgrade semgrep
+
+      - name: Run Semgrep (security-audit + OWASP Top Ten)
+        id: semgrep
+        continue-on-error: true
+        run: |
+          mkdir -p reports
+          set +e
+          semgrep scan \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --json \
+            --output reports/semgrep-results.json \
+            --sarif-output reports/semgrep-results.sarif \
+            --exclude node_modules \
+            --exclude test \
+            --exclude artifacts \
+            --exclude evidencias \
+            .
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize Semgrep findings
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("reports/semgrep-results.json")
+          if not p.exists():
+              print("Semgrep JSON missing")
+              raise SystemExit(0)
+          data = json.loads(p.read_text(encoding="utf-8"))
+          results = data.get("results") or []
+          errors = [r for r in results if str((r.get("extra") or {}).get("severity","")).upper()=="ERROR"]
+          print(f"Total findings: {len(results)}")
+          print(f"ERROR findings: {len(errors)}")
+          for r in errors:
+              print(f"ERROR {r.get('check_id')} {r.get('path')}:{r.get('start',{}).get('line')}")
+          pathlib.Path("reports/sast-status.txt").write_text(
+              "FAIL\n" if errors else "PASS\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload Semgrep artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: |
+            reports/semgrep-results.json
+            reports/semgrep-results.sarif
+            reports/sast-status.txt
+          if-no-files-found: warn
+
+  sbom:
+    name: SBOM (Syft CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate CycloneDX SBOM with Syft
+        uses: anchore/sbom-action@v0.24.3
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          upload-artifact: false
+
+      - name: Validate SBOM and create evidence snippets
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("sbom.cyclonedx.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          required = ["bomFormat", "specVersion", "metadata", "components"]
+          missing = [k for k in required if k not in data]
+          if missing:
+              raise SystemExit(f"Invalid CycloneDX SBOM, missing keys: {missing}")
+          components = data.get("components") or []
+          print(f"bomFormat={data.get('bomFormat')}")
+          print(f"specVersion={data.get('specVersion')}")
+          print(f"components={len(components)}")
+          evid = pathlib.Path("evidencias")
+          evid.mkdir(parents=True, exist_ok=True)
+          pretty = json.dumps(data, indent=2).splitlines()
+          (evid / "sbom-primeras-30-lineas.txt").write_text("\n".join(pretty[:30]) + "\n", encoding="utf-8")
+          pick = None
+          for name in ("marked", "express", "needle"):
+              pick = next((c for c in components if c.get("name") == name), None)
+              if pick:
+                  break
+          if pick is None and components:
+              pick = components[0]
+          (evid / "sbom-componente-ejemplo.json").write_text(json.dumps(pick, indent=2), encoding="utf-8")
+          print(f"Example component: {pick.get('name')}@{pick.get('version')}")
+          PY
+
+      - name: Upload SBOM artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: |
+            sbom.cyclonedx.json
+            evidencias/sbom-primeras-30-lineas.txt
+            evidencias/sbom-componente-ejemplo.json
+          if-no-files-found: warn
+
+  sca-dependency-check:
+    name: SCA (OWASP Dependency-Check)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 14 (aligned with project CI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "14"
+          cache: npm
+
+      - name: Install npm dependencies (for richer SCA analysis)
+        continue-on-error: true
+        run: npm ci --ignore-scripts
+
+      - name: Run OWASP Dependency-Check
+        id: odc
+        continue-on-error: true
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          mkdir -p reports/dependency-check
+          SUPPRESSION_ARGS=()
+          if [ -f dependency-check-suppressions.xml ]; then
+            echo "Using suppression file dependency-check-suppressions.xml"
+            SUPPRESSION_ARGS+=(--suppression /src/dependency-check-suppressions.xml)
+          else
+            echo "No suppression file present (expected for initial vulnerable run)"
+          fi
+
+          # Modern Dependency-Check NVD API rejects an empty/missing API key (fatal update error).
+          # Technically correct options:
+          #   1) secrets.NVD_API_KEY  -> NVD REST API
+          #   2) no key               -> official NVD JSON 2.0 datafeed / project mirror
+          NVD_ARGS=()
+          if [ -n "${NVD_API_KEY}" ]; then
+            echo "NVD API key detected; using authenticated NVD API access"
+            NVD_ARGS+=(--nvdApiKey "${NVD_API_KEY}")
+            {
+              echo "mode=nvd-api"
+              echo "nvd_api_key=present"
+              echo "note=NVD REST API + Node/RetireJS analyzers"
+            } > reports/dependency-check/sca-runtime-notes.txt
+          else
+            echo "WARNING: secrets.NVD_API_KEY not set."
+            echo "Observed local failure without key: Invalid API Key / Error updating the NVD Data."
+            echo "Fallback: --nvdDatafeed using Dependency-Check NVD JSON cache mirror (no API key)."
+            echo "Preferred long-term fix: set repo secret NVD_API_KEY from https://nvd.nist.gov/developers/request-an-api-key"
+            NVD_ARGS+=(--nvdDatafeed "https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz")
+            {
+              echo "mode=nvd-datafeed-mirror"
+              echo "nvd_api_key=absent"
+              echo "what=NVD API update fails with empty/missing API key"
+              echo "why=Dependency-Check NVD client requires a non-empty key for API mode"
+              echo "solution=Set GitHub Actions secret NVD_API_KEY"
+              echo "fallback=--nvdDatafeed mirror so SCA still runs and --failOnCVSS 7 remains enforceable"
+            } > reports/dependency-check/sca-runtime-notes.txt
+          fi
+
+          set +e
+          docker run --rm \
+            -v "$PWD":/src \
+            -v dependency-check-data:/usr/share/dependency-check/data \
+            owasp/dependency-check:latest \
+            --scan /src \
+            --project "OWASP NodeGoat" \
+            --format HTML \
+            --format JSON \
+            --out /src/reports/dependency-check \
+            --failOnCVSS 7 \
+            --enableExperimental \
+            --nodeAuditSkipDevDependencies \
+            --exclude "/src/.git/**" \
+            --exclude "/src/test/**" \
+            --exclude "/src/artifacts/**" \
+            --exclude "/src/evidencias/**" \
+            --exclude "/src/reports/**" \
+            "${NVD_ARGS[@]}" \
+            "${SUPPRESSION_ARGS[@]}"
+          code=$?
+          echo "$code" > reports/dependency-check/exit-code.txt
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "Dependency-Check exit code: $code"
+
+      - name: Evaluate SCA gate status from report
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          out = pathlib.Path("reports/dependency-check")
+          out.mkdir(parents=True, exist_ok=True)
+          report = out / "dependency-check-report.json"
+          # ODC may name the file after the project
+          candidates = list(out.glob("*.json"))
+          if not report.exists():
+              for c in candidates:
+                  if c.name != "exit-code.txt":
+                      report = c
+                      break
+          status_path = out / "sca-status.txt"
+          notes_path = out / "sca-notes.txt"
+          notes = []
+          if not report.exists():
+              notes.append("Dependency-Check JSON report was not generated.")
+              notes.append("Possible causes: NVD availability, rate limits, missing NVD_API_KEY, or tool/runtime error.")
+              notes.append("Check the Run OWASP Dependency-Check step logs.")
+              status_path.write_text("FAIL\n", encoding="utf-8")
+              notes_path.write_text("\n".join(notes) + "\n", encoding="utf-8")
+              print("\n".join(notes))
+              raise SystemExit(0)
+
+          data = json.loads(report.read_text(encoding="utf-8"))
+          high = 0
+          examples = []
+          for dep in data.get("dependencies") or []:
+              dep_name = dep.get("fileName") or dep.get("filePath") or "unknown"
+              for vuln in dep.get("vulnerabilities") or []:
+                  score = None
+                  for key in ("cvssv3", "cvssV3", "cvssv2", "cvssV2"):
+                      block = vuln.get(key) or {}
+                      if isinstance(block, dict) and block.get("baseScore") is not None:
+                          score = float(block["baseScore"])
+                          break
+                  if score is None:
+                      sev = str(vuln.get("severity") or "").upper()
+                      score = 9.0 if sev == "CRITICAL" else 7.0 if sev == "HIGH" else 0.0
+                  if score >= 7.0:
+                      high += 1
+                      if len(examples) < 15:
+                          examples.append(f"{vuln.get('name')} CVSS={score} @ {dep_name}")
+
+          notes.append(f"Report file: {report.name}")
+          notes.append(f"Vulnerabilities with CVSS >= 7.0: {high}")
+          notes.extend(examples)
+          status_path.write_text(("FAIL\n" if high else "PASS\n"), encoding="utf-8")
+          notes_path.write_text("\n".join(notes) + "\n", encoding="utf-8")
+          print("\n".join(notes))
+          # Normalize filename for Quality Gate
+          if report.name != "dependency-check-report.json":
+              target = out / "dependency-check-report.json"
+              target.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
+          PY
+
+      - name: Upload Dependency-Check artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-reports
+          path: reports/dependency-check/
+          if-no-files-found: warn
+
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [sast-semgrep, sbom, sca-dependency-check]
+    if: always() && !cancelled()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Semgrep artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: semgrep-results
+          path: reports
+
+      - name: Download Dependency-Check artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dependency-check-reports
+          path: reports/dependency-check
+
+      - name: Download SBOM artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom-artifacts
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Evaluate Quality Gate
+        id: gate
+        run: |
+          mkdir -p evidencias reports
+          # Locate dependency-check JSON
+          DC_JSON="reports/dependency-check/dependency-check-report.json"
+          if [ ! -f "$DC_JSON" ]; then
+            candidate=$(find reports/dependency-check -name '*.json' ! -name 'exit-code.txt' 2>/dev/null | head -n 1 || true)
+            if [ -n "$candidate" ]; then
+              DC_JSON="$candidate"
+            fi
+          fi
+
+          set +e
+          python scripts/quality_gate.py \
+            --semgrep reports/semgrep-results.json \
+            --dependency-check "$DC_JSON" \
+            --threshold 7.0 \
+            --output evidencias/quality-gate-resumen.md
+          code=$?
+          echo "gate_exit=$code" >> "$GITHUB_OUTPUT"
+          if [ $code -eq 0 ]; then
+            echo "QUALITY GATE: PASSED"
+          else
+            echo "QUALITY GATE: FAILED"
+          fi
+          exit $code
+
+      - name: Upload Quality Gate summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-gate-summary
+          path: evidencias/quality-gate-resumen.md
+          if-no-files-found: warn
