@@ -22,7 +22,7 @@ Se implementó un pipeline DevSecOps sobre OWASP NodeGoat (aplicación de entren
 - **Interpretación:** evidencia de A1 Injection intencional de NodeGoat; suficiente para `QUALITY GATE: FAILED` en estado inicial.
 - **Resultado post-remediación:** 0 hallazgos ERROR (PASS)
 - **URL run FAILED:** https://github.com/HenryGonz10/NodeGoat/actions/runs/44002039208
-- **URL run SUCCESS:** ____________________________________
+- **URL run SUCCESS:** https://github.com/HenryGonz10/NodeGoat/actions/runs/44005186720
 
 ---
 

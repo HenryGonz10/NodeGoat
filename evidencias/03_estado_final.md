@@ -21,7 +21,7 @@
 ## Ejecución en GitHub Actions
 Registrar aquí la URL del run SUCCESS tras publicar la remediación:
 
-- URL SUCCESS: ____________________________________
+- URL SUCCESS: https://github.com/HenryGonz10/NodeGoat/actions/runs/44005186720
 
 ## Artefactos esperados en el run SUCCESS
 - `semgrep-results`
